@@ -173,7 +173,7 @@ To use an example:
 
 ---
 
-## ðŸ› ï¸ Development
+##  Development
 
 
 
