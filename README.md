@@ -181,9 +181,7 @@ npm install
 
 # Build TypeScript
 npm run build
-```
 
-```
 
 ### How It Works
 
