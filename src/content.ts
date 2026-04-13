@@ -293,48 +293,150 @@ class ShareShieldContentScript {
   private processTextNode(textNode: Text) {
     if (!this.config) return;
     
-    const parent = textNode.parentElement;
-    if (!parent || parent.hasAttribute('data-censor')) return;
+    let targetNode: Node = textNode;
+    const parent = targetNode.parentElement;
+    if (!parent) return;
 
-    const text = textNode.textContent || '';
-    if (!text.trim()) return;
+    let nodeToProcess: Node = textNode;
+    let containerForReplacement = parent;
+    let nodeToReplace: Node = textNode;
 
-    // Check if text should be ignored
-    if (this.shouldIgnoreText(text)) return;
+    const isCensoredSpan = parent.hasAttribute('data-censor');
+    
+    if (isCensoredSpan) {
+      const grandParent = parent.parentElement;
+      if (!grandParent) return;
+      containerForReplacement = grandParent;
+      nodeToReplace = parent;
+    } else if (parent.classList.contains('blurred') || parent.classList.contains('scrambled')) {
+      return;
+    }
+
+    const text = nodeToProcess.textContent || '';
+    if (!text.trim()) {
+      if (isCensoredSpan) {
+        containerForReplacement.replaceChild(document.createTextNode(text), nodeToReplace);
+      }
+      return;
+    }
 
     const fragments = this.createCensoredFragments(text);
     
-    if (fragments.length > 1 || (fragments.length === 1 && fragments[0].censored)) {
-      const parentNode = textNode.parentNode;
-      if (parentNode) {
-        const docFragment = document.createDocumentFragment();
-        
-        fragments.forEach((fragment) => {
-          if (fragment.censored) {
-            const span = document.createElement('span');
-            span.setAttribute('data-censor', '1');
+    if (!isCensoredSpan && fragments.length === 1 && !fragments[0].censored) return;
 
-            if (this.mode === 'scramble') {
-              // Scramble mode: replace text with fake data
-              const scrambled = shareshieldScrambler.scramble(fragment.text);
-              span.setAttribute('data-shareshield-original', fragment.text);
-              span.textContent = scrambled;
-              span.className = 'scrambled';
-            } else {
-              // Blur mode: blur the original text
-              span.textContent = fragment.text;
-              span.className = 'blurred';
-              this.applyBlurStyling(span);
-            }
-
-            docFragment.appendChild(span);
-          } else {
-            docFragment.appendChild(document.createTextNode(fragment.text));
-          }
-        });
-
-        parentNode.replaceChild(docFragment, textNode);
+    let selectionOffsetStart = -1;
+    let selectionOffsetEnd = -1;
+    
+    const selection = window.getSelection();
+    if (selection && selection.rangeCount > 0) {
+      const range = selection.getRangeAt(0);
+      if (range.startContainer === textNode) {
+        selectionOffsetStart = range.startOffset;
       }
+      if (range.endContainer === textNode) {
+        selectionOffsetEnd = range.endOffset;
+      }
+    }
+
+    const docFragment = document.createDocumentFragment();
+    
+    let startNodeToRestore: Node | null = null;
+    let startOffsetToRestore = 0;
+    let endNodeToRestore: Node | null = null;
+    let endOffsetToRestore = 0;
+
+    let currentStringIndex = 0;
+
+    fragments.forEach((fragment) => {
+      let newNode: Node;
+      let textNodeForCursor: Text;
+
+      if (fragment.censored) {
+        const span = document.createElement('span');
+        span.setAttribute('data-censor', '1');
+        span.setAttribute('contenteditable', 'false');
+
+        if (this.mode === 'scramble') {
+          const scrambled = shareshieldScrambler.scramble(fragment.text);
+          span.setAttribute('data-shareshield-original', fragment.text);
+          const tNode = document.createTextNode(scrambled);
+          span.appendChild(tNode);
+          span.className = 'scrambled';
+          textNodeForCursor = tNode;
+        } else {
+          span.className = 'blurred';
+          const tNode = document.createTextNode(fragment.text);
+          span.appendChild(tNode);
+          this.applyBlurStyling(span);
+          textNodeForCursor = tNode;
+        }
+
+        docFragment.appendChild(span);
+        newNode = span;
+      } else {
+        textNodeForCursor = document.createTextNode(fragment.text);
+        docFragment.appendChild(textNodeForCursor);
+        newNode = textNodeForCursor;
+      }
+
+      const fragmentLen = fragment.text.length;
+      const fragmentEndIndex = currentStringIndex + fragmentLen;
+
+      if (!startNodeToRestore && selectionOffsetStart >= currentStringIndex && selectionOffsetStart <= fragmentEndIndex) {
+        startNodeToRestore = textNodeForCursor;
+        startOffsetToRestore = Math.min(selectionOffsetStart - currentStringIndex, textNodeForCursor.length);
+      }
+
+      if (!endNodeToRestore && selectionOffsetEnd >= currentStringIndex && selectionOffsetEnd <= fragmentEndIndex) {
+        endNodeToRestore = textNodeForCursor;
+        endOffsetToRestore = Math.min(selectionOffsetEnd - currentStringIndex, textNodeForCursor.length);
+      }
+
+      currentStringIndex += fragmentLen;
+    });
+
+    try {
+      containerForReplacement.replaceChild(docFragment, nodeToReplace);
+    } catch (e) {
+      console.error("[ShareShield] Failed to replace child", e);
+    }
+
+    if (startNodeToRestore && endNodeToRestore && selection) {
+      try {
+        const newRange = document.createRange();
+        newRange.setStart(startNodeToRestore, startOffsetToRestore);
+        newRange.setEnd(endNodeToRestore, endOffsetToRestore);
+        selection.removeAllRanges();
+        selection.addRange(newRange);
+      } catch (e) {
+        console.error("[ShareShield] Failed to restore selection", e);
+      }
+    }
+  }
+
+  private checkInputElement(inputElement: HTMLInputElement | HTMLTextAreaElement) {
+    const value = inputElement.value;
+    if (!value || !value.trim()) {
+      this.removeBlurStyling(inputElement);
+      return;
+    }
+
+    const fragments = this.createCensoredFragments(value);
+    const hasMatch = fragments.some(f => f.censored);
+
+    if (hasMatch) {
+      this.processedNodes.add(inputElement);
+      this.applyBlurStyling(inputElement);
+    } else {
+      this.removeBlurStyling(inputElement);
+    }
+  }
+
+  private removeBlurStyling(element: Element) {
+    element.classList.remove('blurred');
+    if (element.hasAttribute('data-shareshield-inline')) {
+      (element as HTMLElement).style.removeProperty('filter');
+      element.removeAttribute('data-shareshield-inline');
     }
   }
 
@@ -345,31 +447,18 @@ class ShareShieldContentScript {
     const inputs = element.querySelectorAll('input, textarea');
     
     inputs.forEach((input) => {
-      if (this.processedNodes.has(input) || this.shouldIgnoreElement(input)) return;
-      if (input.classList.contains('blurred')) return;
+      if (this.shouldIgnoreElement(input)) return;
 
       const inputElement = input as HTMLInputElement | HTMLTextAreaElement;
-      const value = inputElement.value;
-
-      if (!value || !value.trim()) return;
-
-      // Check if the value should be ignored
-      if (this.shouldIgnoreText(value)) return;
-
-      // Check if value matches any regex pattern
-      let hasMatch = false;
-      for (const regex of this.compiledRegex) {
-        regex.lastIndex = 0;
-        if (regex.test(value)) {
-          hasMatch = true;
-          break;
-        }
+      
+      if (!inputElement.hasAttribute('data-shareshield-listener')) {
+        inputElement.setAttribute('data-shareshield-listener', '1');
+        inputElement.addEventListener('input', () => {
+          this.checkInputElement(inputElement);
+        });
       }
-
-      if (hasMatch) {
-        this.processedNodes.add(input);
-        this.applyBlurStyling(input);
-      }
+      
+      this.checkInputElement(inputElement);
     });
   }
 
@@ -397,15 +486,35 @@ class ShareShieldContentScript {
       }
     }
 
+    // Find all ignore regex matches
+    const ignores: Array<{ start: number; end: number }> = [];
+    for (const regex of this.compiledIgnoreRegex) {
+      regex.lastIndex = 0;
+      let match;
+      while ((match = regex.exec(text)) !== null) {
+        ignores.push({ start: match.index, end: match.index + match[0].length });
+        if (match.index === regex.lastIndex) regex.lastIndex++;
+      }
+    }
+
     if (matches.length === 0) {
       return [{ text, censored: false }];
     }
 
-    // Sort and merge overlapping matches
-    matches.sort((a, b) => a.start - b.start);
+    // Filter matches that overlap with ignores
+    const validMatches = matches.filter(m => {
+      return !ignores.some(ig => Math.max(m.start, ig.start) < Math.min(m.end, ig.end));
+    });
+
+    if (validMatches.length === 0) {
+      return [{ text, censored: false }];
+    }
+
+    // Sort and merge overlapping validMatches
+    validMatches.sort((a, b) => a.start - b.start);
     const merged: Array<{ start: number; end: number }> = [];
     
-    for (const match of matches) {
+    for (const match of validMatches) {
       if (merged.length === 0 || merged[merged.length - 1].end < match.start) {
         merged.push(match);
       } else {
@@ -476,6 +585,7 @@ class ShareShieldContentScript {
       const span = document.createElement('span');
       span.setAttribute('data-censor', '1');
       span.setAttribute('data-shareshield-original', text);
+      span.setAttribute('contenteditable', 'false');
       span.textContent = shareshieldScrambler.scramble(text);
       span.className = 'scrambled';
       textNode.parentNode?.replaceChild(span, textNode);
